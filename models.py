@@ -18,8 +18,9 @@ def make_model(track):
     if track == "list_aware":
         return ListPriceBaseline()
         # return FeatureModel(features.list_aware_features)   # try this instead
-    return NearestSalesBaseline(k=10)
-    # return FeatureModel(features.off_market_features)       # try this instead
+    return OffMarketModel()
+    # return NearestSalesBaseline(k=10)                       # the starter baseline
+    # return FeatureModel(features.off_market_features)       # the starter's tree model
 
 
 class ListPriceBaseline:
@@ -90,3 +91,52 @@ class FeatureModel:
 
     def predict(self, homes):
         return np.exp(self.model.predict(self.make_features(homes)))
+
+
+class OffMarketModel:
+    """Off-market model: start from what comparable homes sold for, then let
+    gradient-boosted trees correct that guess for how this home differs.
+
+    1. Starting guess: the median price of the 15 nearest earlier sales of the same
+       type, each moved to the current market level (features.comparable_features).
+    2. The trees learn log(sold price) - log(starting guess): how far above or below
+       its comps a home sells, given its size, lot, location, remarks and so on.
+    3. Prediction = starting guess * exp(the trees' correction).
+
+    Why not let the trees predict the price directly? Trees cannot extrapolate: they
+    never predict a price level they have not seen. The starting guess carries the
+    market level forward in time; the trees only need to learn corrections, which
+    change much more slowly than prices do.
+
+    Every feature uses only sales from before the month the home was listed, for the
+    training homes too, so the model learns under the same conditions it is used in.
+    """
+
+    CATEGORY_COLUMNS = ["house_style", "municipality"]
+    SALE_COLUMNS = ["ml_num", "house_type_name", "community", "date_sold", "latitude", "longitude",
+                    "house_area", "sold_price"]
+
+    def __init__(self, **tree_settings):
+        settings = dict(max_iter=600, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=50,
+                        l2_regularization=1.0, random_state=0)
+        settings.update(tree_settings)
+        self.model = HistGradientBoostingRegressor(**settings)
+
+    def features(self, homes):
+        return features.off_market_model_features(homes, self.sales, self.categories)
+
+    def fit(self, train):
+        self.sales = train[self.SALE_COLUMNS]
+        self.categories = {c: sorted(train[c].dropna().unique()) for c in self.CATEGORY_COLUMNS}
+        X = self.features(train)
+        target = np.log(train["sold_price"]) - X["starting_guess"]
+        # The first homes of 2021 have no earlier sales to compare with: skip them.
+        usable = target.notna()
+        self.fallback = float(np.log(train["sold_price"]).median())
+        self.model.fit(X[usable], target[usable])
+        return self
+
+    def predict(self, homes):
+        X = self.features(homes)
+        guess = X["starting_guess"].fillna(self.fallback)
+        return np.exp(guess + self.model.predict(X)).to_numpy()
