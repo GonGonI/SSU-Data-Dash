@@ -42,6 +42,9 @@ def off_market_features(homes):
     # One 0/1 column per property type.
     for kind in PROPERTY_TYPES:
         X["is_" + kind] = (homes["house_type_name"] == kind).astype(int)
+    X["lot_front"] = homes["lot_front"]
+    X["lot_depth"] = homes["lot_depth"]
+    X["lot_area"] = homes["lot_front"] * homes["lot_depth"]    
     return X
 
 
