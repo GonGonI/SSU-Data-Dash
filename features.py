@@ -42,6 +42,24 @@ def off_market_features(homes):
     # One 0/1 column per property type.
     for kind in PROPERTY_TYPES:
         X["is_" + kind] = (homes["house_type_name"] == kind).astype(int)
+    # 1. added lot area 
+    X["lot_area"] = (pd.to_numeric(homes["lot_front"], errors="coerce")
+                    * pd.to_numeric(homes["lot_depth"], errors="coerce"))
+    # 5. added municipality 
+    X["municipality"] = homes["municipality"]
+    # 6. added community 
+    X["community"] = homes["community"].astype("object")
+    # 7. added house_style
+    # X["house_style"] = homes["house_style"].astype("object")
+    # 8. added garage 
+    # X["garage"] = homes["garage"].astype(int)
+    # 9.
+    text = homes["remarks"].fillna("").str.lower()   # add this line once, before the flags
+    X["kw_renovated"] = text.str.contains("renovat|updated|upgraded", regex=True).astype(int)
+    X["kw_needs_work"] = text.str.contains("needs work|handyman|as is|fixer", regex=True).astype(int)
+    X["kw_view"] = text.str.contains("view|ravine|waterfront", regex=True).astype(int)
+    X["kw_luxury"] = text.str.contains("luxury|custom|designer|gourmet", regex=True).astype(int)
+
     return X
 
 

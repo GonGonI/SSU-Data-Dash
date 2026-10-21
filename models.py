@@ -8,6 +8,7 @@ make_model() picks the model for each track. The two starting models are baselin
 deliberately simple, so you can measure how much your own ideas add.
 """
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
 import features
@@ -16,10 +17,10 @@ import features
 def make_model(track):
     """Return a fresh, untrained model for "off_market" or "list_aware"."""
     if track == "list_aware":
-        return ListPriceBaseline()
-        # return FeatureModel(features.list_aware_features)   # try this instead
-    return NearestSalesBaseline(k=10)
-    # return FeatureModel(features.off_market_features)       # try this instead
+        #return ListPriceBaseline()
+        return FeatureModel(features.list_aware_features)   # try this instead
+    #return NearestSalesBaseline(k=10)
+    return FeatureModel(features.off_market_features)       # try this instead
 
 
 class ListPriceBaseline:
@@ -81,12 +82,44 @@ class FeatureModel:
     """
 
     def __init__(self, make_features):
+        # self.make_features = make_features
+        # self.model = HistGradientBoostingRegressor(
+        #     # 2. Decreased Learning Rate to increase accuracy and careful learning 
+        #     learning_rate=0.05, #default is 0.1, lowering learning rate slows learning down but allows for more accuracy 
+        #     max_iter=500, #default iteration is 100, but as learning
+        #     # 3. changing loss function to be based on absolute error  
+        #     loss= "absolute_error",
+        #     random_state=0)
         self.make_features = make_features
-        self.model = HistGradientBoostingRegressor(random_state=0)
+        self.model = HistGradientBoostingRegressor(
+            categorical_features="from_dtype", 
+            learning_rate=0.05, 
+            max_iter=500,
+            # loss= "absolute_error",
+            random_state=0)   # edit: added the argument
+        self.categories = {}  
+    
+    def _encode(self, X, fit=False):
+        X = X.copy()
+        for col in X.columns:
+            if not pd.api.types.is_numeric_dtype(X[col]):
+                if fit:
+                    self.categories[col] = list(X[col].value_counts().index[:250])
+                X[col] = pd.Categorical(X[col], categories=self.categories[col])
+        return X
 
     def fit(self, train):
-        self.model.fit(self.make_features(train), np.log(train["sold_price"]))
+        # 4. added sample weights -> adjusting weights to be heavier in more recent dates
+        # age_months = (train["date_sold"].max() - train["date_sold"]).dt.days /30.44
+        # weights = 0.5 ** (age_months /6)
+        # self.model.fit(self.make_features(train), np.log(train["sold_price"]), sample_weight= weights)
+        # self.model.fit(self.make_features(train), np.log(train["sold_price"])) # default weights
+        self.model.fit(self._encode(self.make_features(train), fit=True), np.log(train["sold_price"])) #encode weights
+        # self.model.fit(self._encode(self.make_features(train), fit=True), np.log(train["sold_price"]), sample_weight= weights) #encode +sample weights
+
         return self
 
     def predict(self, homes):
-        return np.exp(self.model.predict(self.make_features(homes)))
+        # return np.exp(self.model.predict(self.make_features(homes)))
+        return np.exp(self.model.predict(self._encode(self.make_features(homes))))
+
