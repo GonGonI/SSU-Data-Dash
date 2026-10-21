@@ -123,3 +123,4 @@ class FeatureModel:
         # return np.exp(self.model.predict(self.make_features(homes)))
         return np.exp(self.model.predict(self._encode(self.make_features(homes))))
 
+#test
