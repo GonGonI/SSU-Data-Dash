@@ -59,6 +59,8 @@ def off_market_features(homes):
     X["kw_needs_work"] = text.str.contains("needs work|handyman|as is|fixer", regex=True).astype(int)
     X["kw_view"] = text.str.contains("view|ravine|waterfront", regex=True).astype(int)
     X["kw_luxury"] = text.str.contains("luxury|custom|designer|gourmet", regex=True).astype(int)
+    # 10. added month of year 
+    X["month_of_year"] = homes["date_listed"].dt.month
 
     return X
 
@@ -68,4 +70,3 @@ def list_aware_features(homes):
     X = off_market_features(homes)
     X["list_price"] = homes["list_price"]
     return X
-#test

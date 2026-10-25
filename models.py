@@ -18,9 +18,10 @@ def make_model(track):
     """Return a fresh, untrained model for "off_market" or "list_aware"."""
     if track == "list_aware":
         #return ListPriceBaseline()
-        return FeatureModel(features.list_aware_features)   # try this instead
+        # return OffMarketModelEvana(features.list_aware_features)   # try this instead
+        return OffMarketModelEvana(features.list_aware_features)   # try this instead
     #return NearestSalesBaseline(k=10)
-    return FeatureModel(features.off_market_features)       # try this instead
+    return OffMarketModelEvana(features.off_market_features)       # try this instead
 
 
 class ListPriceBaseline:
@@ -72,13 +73,28 @@ class NearestSalesBaseline:
         nearest = np.argsort(distance, kind="stable")[: self.k]
         return float(np.median(earlier["sold_price"].to_numpy()[nearest]))
 
-
 class FeatureModel:
     """A machine-learning model (gradient-boosted trees) on the features in features.py.
 
     It learns log(price) rather than price, so a 10% miss on a cheap condo counts
     as much as a 10% miss on an expensive house. Not used until you switch it on
     in make_model().
+    """
+
+    def __init__(self, make_features):
+        self.make_features = make_features
+        self.model = HistGradientBoostingRegressor(random_state=0)
+
+    def fit(self, train):
+        self.model.fit(self.make_features(train), np.log(train["sold_price"]))
+        return self
+
+    def predict(self, homes):
+        return np.exp(self.model.predict(self.make_features(homes)))
+    
+class OffMarketModelEvana:
+    """A machine-learning model (gradient-boosted trees) on the updated features in features in features.py.
+    It adds and implements various different features off the original set.
     """
 
     def __init__(self, make_features):
@@ -123,4 +139,3 @@ class FeatureModel:
         # return np.exp(self.model.predict(self.make_features(homes)))
         return np.exp(self.model.predict(self._encode(self.make_features(homes))))
 
-#test
