@@ -116,14 +116,26 @@ class OffMarketModel:
     SALE_COLUMNS = ["ml_num", "house_type_name", "community", "date_sold", "latitude", "longitude",
                     "house_area", "sold_price"]
 
-    def __init__(self, **tree_settings):
+    def __init__(self, k=15, comp_years=2, size_weight=5.0, use_sized_comps=False,
+                 half_life_years=None, exclude=(), **tree_settings):
+        """k, comp_years, size_weight: how comparables are chosen (features.comparable_features).
+        use_sized_comps: start from comps matched on size as well as location.
+        half_life_years: if set, older training sales count less: a sale this many years
+        older than the newest counts half as much. None: every sale counts the same.
+        exclude: feature columns to leave out, to test what a feature group adds.
+        tree_settings: passed to HistGradientBoostingRegressor, e.g. loss="absolute_error"."""
+        self.comp_settings = dict(k=k, comp_years=comp_years, size_weight=size_weight,
+                                  use_sized_comps=use_sized_comps)
+        self.half_life_years = half_life_years
+        self.exclude = list(exclude)
         settings = dict(max_iter=600, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=50,
                         l2_regularization=1.0, random_state=0)
         settings.update(tree_settings)
         self.model = HistGradientBoostingRegressor(**settings)
 
     def features(self, homes):
-        return features.off_market_model_features(homes, self.sales, self.categories)
+        X = features.off_market_model_features(homes, self.sales, self.categories, **self.comp_settings)
+        return X.drop(columns=self.exclude)
 
     def fit(self, train):
         self.sales = train[self.SALE_COLUMNS]
@@ -132,8 +144,12 @@ class OffMarketModel:
         target = np.log(train["sold_price"]) - X["starting_guess"]
         # The first homes of 2021 have no earlier sales to compare with: skip them.
         usable = target.notna()
+        weight = None
+        if self.half_life_years:
+            age_years = (train["date_sold"].max() - train["date_sold"]).dt.days / 365.25
+            weight = (0.5 ** (age_years / self.half_life_years))[usable]
         self.fallback = float(np.log(train["sold_price"]).median())
-        self.model.fit(X[usable], target[usable])
+        self.model.fit(X[usable], target[usable], sample_weight=weight)
         return self
 
     def predict(self, homes):

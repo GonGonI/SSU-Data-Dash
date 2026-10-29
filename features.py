@@ -138,10 +138,15 @@ def market_index(sales, last_month):
 
 COMPARABLE_COLUMNS = ["comp_log_price", "comp_log_price_per_sqft", "comp_log_square_feet",
                       "comp_spread", "comp_distance_km", "comp_months_ago",
-                      "community_log_price", "community_sales", "market_level"]
+                      "building_log_price", "building_log_price_per_sqft", "building_sales",
+                      "sized_comp_log_price", "sized_comp_distance",
+                      "community_log_price", "community_sales",
+                      "market_level", "market_change_3m", "market_change_12m"]
+
+SAME_BUILDING_KM = 0.05   # comps closer than 50 m count as the same building or block
 
 
-def comparable_features(homes, sales, k=15, comp_years=2, community_months=12):
+def comparable_features(homes, sales, k=15, comp_years=2, community_months=12, size_weight=5.0):
     """What similar homes sold for, from sales before the month each home was listed.
 
     For each home, using sales of the same property type only:
@@ -152,7 +157,15 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12):
     - community_*: the median adjusted log price of the same type in the same
       community over the last `community_months` months, and how many sales that is.
       (Close to the 17.7% "maximum error" baseline from the handout.)
-    - market_level: the type's market index in the month before listing.
+    - building_*: those of the k comps within 50 m: in a condo building, the sales of
+      other units in the same building, usually the best comparables there are.
+    - sized_comp_*: the k nearest comps when size counts as well as location: each
+      comp's distance adds `size_weight` km per unit of log square feet, so a comp
+      twice the size counts as 3.5 km further away. Helps for homes much bigger or
+      smaller than their neighbours.
+    - market_level: the type's market index in the month before listing, and
+      market_change_*: how much it moved over the 3 and 12 months before that (a
+      rising market tends to sell above its recent comps).
     """
     out = pd.DataFrame(np.nan, index=homes.index, columns=COMPARABLE_COLUMNS)
     listed = month_number(homes["date_listed"])
@@ -176,7 +189,12 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12):
         if reference not in index.index or np.isnan(index.at[reference, kind]):
             continue
         rows = positions[group.index].to_numpy()
-        out.loc[group.index, "market_level"] = index.at[reference, kind]
+        level = index[kind]
+        out.loc[group.index, "market_level"] = level.at[reference]
+        for months_back in (3, 12):
+            if reference - months_back in level.index:
+                change = level.at[reference] - level.at[reference - months_back]
+                out.loc[group.index, f"market_change_{months_back}m"] = change
 
         earlier = (kinds == kind) & (sale_month < month)
         level_then = index[kind].reindex(sale_month[earlier]).to_numpy()
@@ -210,24 +228,51 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12):
             out.loc[group.index, "comp_spread"] = np.std(prices, axis=1)
             out.loc[group.index, "comp_distance_km"] = np.median(distance, axis=1)
             out.loc[group.index, "comp_months_ago"] = np.median(pool_age[nearest], axis=1)
+
+            same_building = distance < SAME_BUILDING_KM
+            out.loc[group.index, "building_sales"] = same_building.sum(axis=1)
+            out.loc[group.index, "building_log_price"] = np.nanmedian(
+                np.where(same_building, prices, np.nan), axis=1)
+            out.loc[group.index, "building_log_price_per_sqft"] = np.nanmedian(
+                np.where(same_building, prices - sqft, np.nan), axis=1)
+
+        # The k nearest by location and size together, for homes and comps with a size.
+        home_sqft = log_square_feet(group["house_area"]).to_numpy()
+        sized_pool = np.isfinite(pool_sqft)
+        sized_homes = np.isfinite(home_sqft)
+        if sized_pool.sum() == 0 or sized_homes.sum() == 0:
+            continue
+        pool_xyz = np.column_stack([pool_xy[sized_pool], size_weight * pool_sqft[sized_pool]])
+        home_xyz = np.column_stack([home_xy[rows][sized_homes], size_weight * home_sqft[sized_homes]])
+        n = min(k, int(sized_pool.sum()))
+        distance, nearest = cKDTree(pool_xyz).query(home_xyz, k=n)
+        distance, nearest = distance.reshape(-1, n), nearest.reshape(-1, n)
+        sized_index = group.index[sized_homes]
+        out.loc[sized_index, "sized_comp_log_price"] = np.median(pool_price[sized_pool][nearest], axis=1)
+        out.loc[sized_index, "sized_comp_distance"] = np.median(distance, axis=1)
     return out
 
 
-def starting_guess(comparables):
+def starting_guess(comparables, use_sized_comps=False):
     """A first estimate of each home's log price before the model's corrections: its
-    comparables if it has them, else its community, else its property type's level."""
-    return (comparables["comp_log_price"]
+    comparables if it has them (matched on size too, if use_sized_comps), else its
+    community, else its property type's level."""
+    guess = comparables["comp_log_price"]
+    if use_sized_comps:
+        guess = comparables["sized_comp_log_price"].fillna(guess)
+    return (guess
             .fillna(comparables["community_log_price"])
             .fillna(comparables["market_level"]))
 
 
-def off_market_model_features(homes, sales, categories):
+def off_market_model_features(homes, sales, categories, use_sized_comps=False, **comp_settings):
     """Every feature of the off-market model: the home itself, what similar homes sold
-    for, and how this home differs from them (bigger than its comps? that matters)."""
+    for, and how this home differs from them (bigger than its comps? that matters).
+    comp_settings (k, comp_years, size_weight) go to comparable_features()."""
     X = home_features(homes, categories)
-    comparables = comparable_features(homes, sales)
+    comparables = comparable_features(homes, sales, **comp_settings)
     X = X.join(comparables)
-    X["starting_guess"] = starting_guess(comparables)
+    X["starting_guess"] = starting_guess(comparables, use_sized_comps)
     X["sqft_vs_comps"] = X["log_square_feet"] - X["comp_log_square_feet"]
     X["guess_from_price_per_sqft"] = X["comp_log_price_per_sqft"] + X["log_square_feet"]
     return X
