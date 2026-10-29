@@ -137,3 +137,22 @@ To pass settings in from `make_model()`: `return OffMarketModel(loss="absolute_e
 - **Error analysis.** `validation_predictions.csv` has `house_type_name` and `month`, so group the
   errors by them (see `error_by_price_range` in run.py for a template). Off-market errors will likely
   be largest for detached houses and the top price decile, where comps are rare and land drives price.
+
+## 6. Experiments: comparing versions fairly
+
+`python experiments.py` runs several versions of the off-market model on six **tuning months**
+(June to November 2025) and prints one table. Each version changes one thing:
+
+| Variant | What changes |
+|---|---|
+| `v1` | the first version (9.33% validation MdAPE), for reference |
+| `new_features` | + same-building sales, size-matched comps, market momentum |
+| `abs_loss` | trees aim at the median error, which matches MdAPE |
+| `sized_guess` | the starting guess uses comps matched on size as well as location |
+| `k8`, `k25` | fewer or more comparables |
+| `recent_weight` | older sales count less (half weight every 2 years) |
+| `more_trees` | more, smaller steps of boosting |
+
+Why not compare on the validation months? Picking the best of 8 versions on the same homes you
+report makes the reported score too optimistic. Tuning on earlier months keeps Dec–May clean:
+run `python run.py validate` once at the end, with the winner in `make_model()`.
