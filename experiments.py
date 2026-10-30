@@ -41,6 +41,10 @@ VARIANTS = {
     "recent_weight": lambda: OffMarketModel(half_life_years=2),       # older sales count less
     "more_trees": lambda: OffMarketModel(max_iter=1500, learning_rate=0.03),
     "text": lambda: OffMarketModel(text_score=True),                  # + a score read from the remarks
+    # Round 2: combinations of the round-1 winners, all with more_trees.
+    "more_trees_text": lambda: OffMarketModel(max_iter=1500, learning_rate=0.03, text_score=True),
+    "more_trees_sized": lambda: OffMarketModel(max_iter=1500, learning_rate=0.03, use_sized_comps=True),
+    "most_trees": lambda: OffMarketModel(max_iter=3000, learning_rate=0.02),
 }
 
 
