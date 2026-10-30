@@ -128,11 +128,15 @@ def market_index(sales, last_month):
     """
     month = month_number(sales["date_sold"])
     log_price = np.log(sales["sold_price"])
+    # Sum and count of log prices for each month and type (one column per type).
     grouped = log_price.groupby([month, sales["house_type_name"]])
     totals, counts = grouped.sum().unstack(), grouped.count().unstack()
+    # Every month from the first sale to the last month we need, even months with no sales.
     months = range(int(month.min()), max(int(month.max()), int(last_month)) + 1)
+    # Add up each month with the two before it: a 3-month window smooths out noise.
     totals = totals.reindex(months).fillna(0).rolling(3, min_periods=1).sum()
     counts = counts.reindex(months).fillna(0).rolling(3, min_periods=1).sum()
+    # Mean = total / count; months with no sales at all carry the last level forward.
     return (totals / counts.where(counts > 0)).ffill()
 
 
@@ -167,10 +171,12 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12, s
       market_change_*: how much it moved over the 3 and 12 months before that (a
       rising market tends to sell above its recent comps).
     """
+    # The answer: one row per home, every column empty until filled below.
     out = pd.DataFrame(np.nan, index=homes.index, columns=COMPARABLE_COLUMNS)
     listed = month_number(homes["date_listed"])
     index = market_index(sales, last_month=listed.max())
 
+    # The sales as plain arrays, which are much faster to filter than a pandas table.
     sale_month = month_number(sales["date_sold"]).to_numpy()
     log_price = np.log(sales["sold_price"].to_numpy(dtype=float))
     log_sqft = log_square_feet(sales["house_area"]).to_numpy()
@@ -196,7 +202,11 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12, s
                 change = level.at[reference] - level.at[reference - months_back]
                 out.loc[group.index, f"market_change_{months_back}m"] = change
 
+        # THE LEAKAGE RULE: only sales of this type that sold before the listing month.
         earlier = (kinds == kind) & (sale_month < month)
+        # Move each earlier sale to the market level of the month before listing:
+        # adjusted = log price + (level now - level when it sold). On the log scale,
+        # adding a difference multiplies by a ratio: a 5% lower market now means 5% off.
         level_then = index[kind].reindex(sale_month[earlier]).to_numpy()
         adjusted = log_price[earlier] + index.at[reference, kind] - level_then
 
@@ -215,9 +225,13 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12, s
         pool_sqft = log_sqft[earlier][window]
         pool_age = month - sale_month[earlier][window]
         n = min(k, len(pool_price))
+        # A KD-tree finds nearest points fast, like an index in a book: it skips the
+        # far-away sales instead of measuring the distance to every one of them.
+        # distance and nearest have one row per home and one column per comp.
         distance, nearest = cKDTree(pool_xy).query(home_xy[rows], k=n)
         distance, nearest = distance.reshape(len(rows), n), nearest.reshape(len(rows), n)
 
+        # Summaries of each home's comps, one number per home (axis=1: across its comps).
         prices = pool_price[nearest]
         sqft = pool_sqft[nearest]
         with np.errstate(all="ignore"), warnings.catch_warnings():
@@ -229,6 +243,7 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12, s
             out.loc[group.index, "comp_distance_km"] = np.median(distance, axis=1)
             out.loc[group.index, "comp_months_ago"] = np.median(pool_age[nearest], axis=1)
 
+            # Same building: keep only the comps within 50 m, blank out the rest (NaN).
             same_building = distance < SAME_BUILDING_KM
             out.loc[group.index, "building_sales"] = same_building.sum(axis=1)
             out.loc[group.index, "building_log_price"] = np.nanmedian(
@@ -242,6 +257,7 @@ def comparable_features(homes, sales, k=15, comp_years=2, community_months=12, s
         sized_homes = np.isfinite(home_sqft)
         if sized_pool.sum() == 0 or sized_homes.sum() == 0:
             continue
+        # Size becomes a third coordinate next to x and y, so "nearest" weighs both.
         pool_xyz = np.column_stack([pool_xy[sized_pool], size_weight * pool_sqft[sized_pool]])
         home_xyz = np.column_stack([home_xy[rows][sized_homes], size_weight * home_sqft[sized_homes]])
         n = min(k, int(sized_pool.sum()))
@@ -273,6 +289,8 @@ def off_market_model_features(homes, sales, categories, use_sized_comps=False, *
     comparables = comparable_features(homes, sales, **comp_settings)
     X = X.join(comparables)
     X["starting_guess"] = starting_guess(comparables, use_sized_comps)
+    # Above 0: bigger than its comps (0.2 is about 22% bigger).
     X["sqft_vs_comps"] = X["log_square_feet"] - X["comp_log_square_feet"]
+    # A second estimate: the comps' price per square foot times this home's size.
     X["guess_from_price_per_sqft"] = X["comp_log_price_per_sqft"] + X["log_square_feet"]
     return X
