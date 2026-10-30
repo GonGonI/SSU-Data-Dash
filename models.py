@@ -21,7 +21,8 @@ def make_model(track):
     if track == "list_aware":
         return ListPriceBaseline()
         # return FeatureModel(features.list_aware_features)   # try this instead
-    return OffMarketModel()
+    # Chosen in experiments.py on June to November 2025 ("more_trees"); see reports/experiments.md.
+    return OffMarketModel(max_iter=1500, learning_rate=0.03)
     # return NearestSalesBaseline(k=10)                       # the starter baseline
     # return FeatureModel(features.off_market_features)       # the starter's tree model
 
