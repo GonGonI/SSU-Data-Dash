@@ -9,6 +9,9 @@ deliberately simple, so you can measure how much your own ideas add.
 """
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import KFold
 
 import features
 
@@ -117,17 +120,19 @@ class OffMarketModel:
                     "house_area", "sold_price"]
 
     def __init__(self, k=15, comp_years=2, size_weight=5.0, use_sized_comps=False,
-                 half_life_years=None, exclude=(), **tree_settings):
+                 half_life_years=None, exclude=(), text_score=False, **tree_settings):
         """k, comp_years, size_weight: how comparables are chosen (features.comparable_features).
         use_sized_comps: start from comps matched on size as well as location.
         half_life_years: if set, older training sales count less: a sale this many years
         older than the newest counts half as much. None: every sale counts the same.
         exclude: feature columns to leave out, to test what a feature group adds.
+        text_score: add RemarksScore, a score read from the listing description.
         tree_settings: passed to HistGradientBoostingRegressor, e.g. loss="absolute_error"."""
         self.comp_settings = dict(k=k, comp_years=comp_years, size_weight=size_weight,
                                   use_sized_comps=use_sized_comps)
         self.half_life_years = half_life_years
         self.exclude = list(exclude)
+        self.text = RemarksScore() if text_score else None
         settings = dict(max_iter=600, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=50,
                         l2_regularization=1.0, random_state=0)
         settings.update(tree_settings)
@@ -148,11 +153,51 @@ class OffMarketModel:
         if self.half_life_years:
             age_years = (train["date_sold"].max() - train["date_sold"]).dt.days / 365.25
             weight = (0.5 ** (age_years / self.half_life_years))[usable]
+        X, target = X[usable].copy(), target[usable]
+        if self.text:
+            X["text_score"] = self.text.fit_out_of_fold(train["remarks"][usable], target.to_numpy())
         self.fallback = float(np.log(train["sold_price"]).median())
-        self.model.fit(X[usable], target[usable], sample_weight=weight)
+        self.model.fit(X, target, sample_weight=weight)
         return self
 
     def predict(self, homes):
         X = self.features(homes)
+        if self.text:
+            X["text_score"] = self.text.predict(homes["remarks"])
         guess = X["starting_guess"].fillna(self.fallback)
         return np.exp(guess + self.model.predict(X)).to_numpy()
+
+
+class RemarksScore:
+    """A score read from the listing description: how far above or below its starting
+    guess a home with these words tends to sell.
+
+    The words and two- and three-word phrases of each description ("blank slate",
+    "new roof", "completely redone") become columns, weighted by how rare they are
+    (TF-IDF), and a ridge regression learns each phrase's effect on
+    log(sold price) - log(starting guess). Ridge shrinks the effects of rare phrases
+    towards 0, so a phrase seen in a few sales cannot claim a big effect.
+
+    The trees then use the score as one more feature. For the training homes, each
+    score comes from a regression fitted WITHOUT that home (5-fold cross-fitting):
+    a regression scoring the homes it learned from would look far more accurate on
+    them than on new homes, and the trees would learn to trust it too much.
+    """
+
+    def __init__(self, alpha=3.0, folds=5):
+        self.alpha = alpha
+        self.folds = folds
+
+    def fit_out_of_fold(self, remarks, target):
+        """Fit on all the training homes; return each home's score from the fold that left it out."""
+        self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), min_df=20, sublinear_tf=True)
+        words = self.vectorizer.fit_transform(remarks.fillna(""))
+        scores = np.zeros(len(target))
+        for fit_rows, score_rows in KFold(self.folds, shuffle=True, random_state=0).split(target):
+            regression = Ridge(alpha=self.alpha).fit(words[fit_rows], target[fit_rows])
+            scores[score_rows] = regression.predict(words[score_rows])
+        self.regression = Ridge(alpha=self.alpha).fit(words, target)
+        return scores
+
+    def predict(self, remarks):
+        return self.regression.predict(self.vectorizer.transform(remarks.fillna("")))

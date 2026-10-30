@@ -40,6 +40,7 @@ VARIANTS = {
     "k25": lambda: OffMarketModel(k=25),                              # more comps, less noise
     "recent_weight": lambda: OffMarketModel(half_life_years=2),       # older sales count less
     "more_trees": lambda: OffMarketModel(max_iter=1500, learning_rate=0.03),
+    "text": lambda: OffMarketModel(text_score=True),                  # + a score read from the remarks
 }
 
 
