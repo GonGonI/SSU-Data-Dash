@@ -8,6 +8,7 @@ make_model() picks the model for each track. The two starting models are baselin
 deliberately simple, so you can measure how much your own ideas add.
 """
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import Ridge
@@ -23,8 +24,9 @@ def make_model(track):
     changing the model here changes everything: validate, report and predict.
     """
     if track == "list_aware":
-        return ListPriceBaseline()
-        # return FeatureModel(features.list_aware_features)   # try this instead
+        # Evana's model (branch evana_code): 4.35% validation MdAPE vs 7.26% for the list price.
+        return ListAwareModel(features.list_aware_evana_features)
+        # return ListPriceBaseline()                          # the starter baseline
     # Chosen in experiments.py on June to November 2025 ("more_trees"): 8.36% MdAPE there,
     # and 8.36% on the Dec 2025 to May 2026 validation months, run once at the end.
     # To try another setting, add a variant to experiments.py rather than editing this line.
@@ -101,6 +103,45 @@ class FeatureModel:
 
     def predict(self, homes):
         return np.exp(self.model.predict(self.make_features(homes)))
+
+
+class ListAwareModel:
+    """List-aware model, by Evana: gradient-boosted trees on the home's features plus
+    its list price (features.list_aware_evana_features).
+
+    Like FeatureModel it learns log(price), but it also uses text columns
+    (municipality, community) as categories. The list price carries most of what the
+    market knows; the trees learn when homes sell above or below it. The list price
+    alone predicts 5.7% too high; this model's median signed error is +0.8%.
+    """
+
+    def __init__(self, make_features):
+        self.make_features = make_features
+        self.model = HistGradientBoostingRegressor(
+            categorical_features="from_dtype",   # treat pandas category columns as categories
+            learning_rate=0.05,                  # smaller steps than the default 0.1...
+            max_iter=500,                        # ...and more of them than the default 100
+            random_state=0)
+        self.categories = {}
+
+    def _encode(self, X, fit=False):
+        """Turn every text column into a category column. When fitting, remember the
+        250 most common values of each (the trees allow at most 255 categories); test
+        homes are then coded with the same list, and any other value counts as missing."""
+        X = X.copy()
+        for col in X.columns:
+            if not pd.api.types.is_numeric_dtype(X[col]):
+                if fit:
+                    self.categories[col] = list(X[col].value_counts().index[:250])
+                X[col] = pd.Categorical(X[col], categories=self.categories[col])
+        return X
+
+    def fit(self, train):
+        self.model.fit(self._encode(self.make_features(train), fit=True), np.log(train["sold_price"]))
+        return self
+
+    def predict(self, homes):
+        return np.exp(self.model.predict(self._encode(self.make_features(homes))))
 
 
 class OffMarketModel:

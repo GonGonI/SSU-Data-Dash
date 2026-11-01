@@ -57,6 +57,38 @@ def list_aware_features(homes):
 
 
 # ---------------------------------------------------------------------------
+# List-aware model (ListAwareModel in models.py), by Evana
+#
+# Kept apart from off_market_features() above, which the off-market model builds on:
+# these features include text columns (municipality, community) that ListAwareModel
+# turns into categories itself.
+# ---------------------------------------------------------------------------
+
+def evana_features(homes):
+    """The starter features plus lot area, location names, remark keywords and the
+    month of the year."""
+    X = off_market_features(homes)
+    X["lot_area"] = (pd.to_numeric(homes["lot_front"], errors="coerce")
+                     * pd.to_numeric(homes["lot_depth"], errors="coerce"))
+    X["municipality"] = homes["municipality"]
+    X["community"] = homes["community"].astype("object")
+    text = homes["remarks"].fillna("").str.lower()
+    X["kw_renovated"] = text.str.contains("renovat|updated|upgraded", regex=True).astype(int)
+    X["kw_needs_work"] = text.str.contains("needs work|handyman|as is|fixer", regex=True).astype(int)
+    X["kw_view"] = text.str.contains("view|ravine|waterfront", regex=True).astype(int)
+    X["kw_luxury"] = text.str.contains("luxury|custom|designer|gourmet", regex=True).astype(int)
+    X["month_of_year"] = homes["date_listed"].dt.month   # seasonality: spring markets run hotter
+    return X
+
+
+def list_aware_evana_features(homes):
+    """Features of the list-aware model: evana_features() plus the list price."""
+    X = evana_features(homes)
+    X["list_price"] = homes["list_price"]
+    return X
+
+
+# ---------------------------------------------------------------------------
 # Off-market model (OffMarketModel in models.py)
 #
 # The features above describe the home itself. The ones below describe what similar
