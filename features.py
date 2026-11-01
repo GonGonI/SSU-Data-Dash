@@ -13,7 +13,11 @@ Ideas to try:
 - words in the remarks, such as "renovated" or "needs work"
 - off-market and list-aware can use different features: list-aware has list_price
 """
+import warnings
+
+import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 PROPERTY_TYPES = ["Condo Apt", "Detached", "Semi-Detached", "Condo Townhouse",
                   "Freehold Townhouse", "Co-Op Apt"]
@@ -42,24 +46,6 @@ def off_market_features(homes):
     # One 0/1 column per property type.
     for kind in PROPERTY_TYPES:
         X["is_" + kind] = (homes["house_type_name"] == kind).astype(int)
-    # 1. added lot area 
-    X["lot_area"] = (pd.to_numeric(homes["lot_front"], errors="coerce")
-                    * pd.to_numeric(homes["lot_depth"], errors="coerce"))
-    # 5. added municipality 
-    X["municipality"] = homes["municipality"]
-    # 6. added community 
-    X["community"] = homes["community"].astype("object")
-    # 7. added house_style
-    # X["house_style"] = homes["house_style"].astype("object")
-    # 8. added garage 
-    # X["garage"] = homes["garage"].astype(int)
-    # 9.
-    text = homes["remarks"].fillna("").str.lower()   # add this line once, before the flags
-    X["kw_renovated"] = text.str.contains("renovat|updated|upgraded", regex=True).astype(int)
-    X["kw_needs_work"] = text.str.contains("needs work|handyman|as is|fixer", regex=True).astype(int)
-    X["kw_view"] = text.str.contains("view|ravine|waterfront", regex=True).astype(int)
-    X["kw_luxury"] = text.str.contains("luxury|custom|designer|gourmet", regex=True).astype(int)
-
     return X
 
 
@@ -67,4 +53,276 @@ def list_aware_features(homes):
     """Features for homes that have a list price: everything above, plus the list price."""
     X = off_market_features(homes)
     X["list_price"] = homes["list_price"]
+    return X
+
+
+# ---------------------------------------------------------------------------
+# List-aware model (ListAwareModel in models.py), by Evana
+#
+# Kept apart from off_market_features() above, which the off-market model builds on:
+# these features include text columns (municipality, community) that ListAwareModel
+# turns into categories itself.
+# ---------------------------------------------------------------------------
+
+def evana_features(homes):
+    """The starter features plus lot area, location names, remark keywords and the
+    month of the year."""
+    X = off_market_features(homes)
+    X["lot_area"] = (pd.to_numeric(homes["lot_front"], errors="coerce")
+                     * pd.to_numeric(homes["lot_depth"], errors="coerce"))
+    X["municipality"] = homes["municipality"]
+    X["community"] = homes["community"].astype("object")
+    text = homes["remarks"].fillna("").str.lower()
+    X["kw_renovated"] = text.str.contains("renovat|updated|upgraded", regex=True).astype(int)
+    X["kw_needs_work"] = text.str.contains("needs work|handyman|as is|fixer", regex=True).astype(int)
+    X["kw_view"] = text.str.contains("view|ravine|waterfront", regex=True).astype(int)
+    X["kw_luxury"] = text.str.contains("luxury|custom|designer|gourmet", regex=True).astype(int)
+    X["month_of_year"] = homes["date_listed"].dt.month   # seasonality: spring markets run hotter
+    return X
+
+
+def list_aware_evana_features(homes):
+    """Features of the list-aware model: evana_features() plus the list price."""
+    X = evana_features(homes)
+    X["list_price"] = homes["list_price"]
+    return X
+
+
+# ---------------------------------------------------------------------------
+# Off-market model (OffMarketModel in models.py)
+#
+# The features above describe the home itself. The ones below describe what similar
+# homes nearby sold for. They need the table of past sales as well as the homes, and
+# every one of them uses only sales from before the month the home was listed: the
+# same rule for the training homes as for the homes we predict, so the model never
+# learns from information it would not have in real use.
+# ---------------------------------------------------------------------------
+
+KM_PER_DEGREE = 111.2   # one degree of latitude; a degree of longitude is 0.72 of that here
+
+# Words in the remarks that might signal condition or quality. Each becomes a 0/1 column;
+# the trees ignore any that do not help. Read some remarks and add your own.
+REMARK_PATTERNS = {
+    "says_renovated": r"renovat|updated|upgraded|remodel|modernized",
+    "says_needs_work": r"needs work|\btlc\b|handyman|contractor|as[- ]is|investor|fixer|potential",
+    "says_luxury": r"luxur|high[- ]end|custom|designer|premium",
+    "says_new": r"brand new|newly built|new build|never lived",
+    "says_view": r"\bviews?\b|lake|ravine|skyline",
+    "says_pool": r"\bpool\b",
+}
+
+
+def month_number(dates):
+    """Months counted from year 0, so month arithmetic is plain integer arithmetic
+    (May 2026 minus 12 is May 2025)."""
+    return dates.dt.year * 12 + dates.dt.month - 1
+
+
+def log_square_feet(house_area):
+    """log of square_feet(), empty where the size is missing or zero."""
+    sqft = square_feet(house_area)
+    return np.log(sqft.where(sqft > 0))
+
+
+def km_coordinates(table):
+    """Latitude and longitude as x, y in kilometres, so distances are in km."""
+    x = table["longitude"].to_numpy(dtype=float) * 0.72 * KM_PER_DEGREE
+    y = table["latitude"].to_numpy(dtype=float) * KM_PER_DEGREE
+    return np.column_stack([x, y])
+
+
+def home_features(homes, categories):
+    """What the home itself is like: the starter features plus lot size, garage, style,
+    municipality and words in the remarks. `categories` holds the text values seen in
+    training, so every text column is coded the same way for training and test homes."""
+    X = off_market_features(homes)
+    X["log_square_feet"] = log_square_feet(homes["house_area"])
+    X["lot_front"] = homes["lot_front"]
+    X["lot_depth"] = homes["lot_depth"]
+    X["lot_area"] = homes["lot_front"] * homes["lot_depth"]
+    X["garage"] = pd.to_numeric(homes["garage"], errors="coerce")
+    for column, values in categories.items():
+        X[column] = pd.Categorical(homes[column], categories=values)
+    remarks = homes["remarks"].fillna("").str.lower()
+    X["remarks_length"] = remarks.str.len()
+    for name, pattern in REMARK_PATTERNS.items():
+        X[name] = remarks.str.contains(pattern, regex=True).astype(int)
+    return X
+
+
+def market_index(sales, last_month):
+    """The price level of each property type, month by month: the mean log sold price
+    over the three months ending in that month.
+
+    Returns a table with one row per month (as a month_number) and one column per
+    property type. Months after the last sale repeat the last known level, so a home
+    listed after the training data ends is valued at the latest prices.
+    """
+    month = month_number(sales["date_sold"])
+    log_price = np.log(sales["sold_price"])
+    # Sum and count of log prices for each month and type (one column per type).
+    grouped = log_price.groupby([month, sales["house_type_name"]])
+    totals, counts = grouped.sum().unstack(), grouped.count().unstack()
+    # Every month from the first sale to the last month we need, even months with no sales.
+    months = range(int(month.min()), max(int(month.max()), int(last_month)) + 1)
+    # Add up each month with the two before it: a 3-month window smooths out noise.
+    totals = totals.reindex(months).fillna(0).rolling(3, min_periods=1).sum()
+    counts = counts.reindex(months).fillna(0).rolling(3, min_periods=1).sum()
+    # Mean = total / count; months with no sales at all carry the last level forward.
+    return (totals / counts.where(counts > 0)).ffill()
+
+
+COMPARABLE_COLUMNS = ["comp_log_price", "comp_log_price_per_sqft", "comp_log_square_feet",
+                      "comp_spread", "comp_distance_km", "comp_months_ago",
+                      "building_log_price", "building_log_price_per_sqft", "building_sales",
+                      "sized_comp_log_price", "sized_comp_distance",
+                      "community_log_price", "community_sales",
+                      "market_level", "market_change_3m", "market_change_12m"]
+
+SAME_BUILDING_KM = 0.05   # comps closer than 50 m count as the same building or block
+
+
+def comparable_features(homes, sales, k=15, comp_years=2, community_months=12, size_weight=5.0):
+    """What similar homes sold for, from sales before the month each home was listed.
+
+    For each home, using sales of the same property type only:
+    - comp_*: its k nearest earlier sales within the last `comp_years` years. Each comp's
+      log price is first moved to today's market level with market_index(), so a sale
+      from 18 months ago counts at what it would fetch now. comp_log_price is the
+      median of those adjusted log prices.
+    - community_*: the median adjusted log price of the same type in the same
+      community over the last `community_months` months, and how many sales that is.
+      (Close to the 17.7% "maximum error" baseline from the handout.)
+    - building_*: those of the k comps within 50 m: in a condo building, the sales of
+      other units in the same building, usually the best comparables there are.
+    - sized_comp_*: the k nearest comps when size counts as well as location: each
+      comp's distance adds `size_weight` km per unit of log square feet, so a comp
+      twice the size counts as 3.5 km further away. Helps for homes much bigger or
+      smaller than their neighbours.
+    - market_level: the type's market index in the month before listing, and
+      market_change_*: how much it moved over the 3 and 12 months before that (a
+      rising market tends to sell above its recent comps).
+    """
+    # The answer: one row per home, every column empty until filled below.
+    out = pd.DataFrame(np.nan, index=homes.index, columns=COMPARABLE_COLUMNS)
+    listed = month_number(homes["date_listed"])
+    index = market_index(sales, last_month=listed.max())
+
+    # The sales as plain arrays, which are much faster to filter than a pandas table.
+    sale_month = month_number(sales["date_sold"]).to_numpy()
+    log_price = np.log(sales["sold_price"].to_numpy(dtype=float))
+    log_sqft = log_square_feet(sales["house_area"]).to_numpy()
+    kinds = sales["house_type_name"].to_numpy()
+    communities = sales["community"].to_numpy()
+    sale_xy = km_coordinates(sales)
+    home_xy = km_coordinates(homes)
+    positions = pd.Series(np.arange(len(homes)), index=homes.index)
+
+    # One group per property type and listing month: they all share the same pool of
+    # earlier sales, so one search tree serves the whole group.
+    for (kind, month), group in homes.groupby([homes["house_type_name"], listed]):
+        if kind not in index.columns:
+            continue
+        reference = month - 1   # the last full month before listing
+        if reference not in index.index or np.isnan(index.at[reference, kind]):
+            continue
+        rows = positions[group.index].to_numpy()
+        level = index[kind]
+        out.loc[group.index, "market_level"] = level.at[reference]
+        for months_back in (3, 12):
+            if reference - months_back in level.index:
+                change = level.at[reference] - level.at[reference - months_back]
+                out.loc[group.index, f"market_change_{months_back}m"] = change
+
+        # THE LEAKAGE RULE: only sales of this type that sold before the listing month.
+        earlier = (kinds == kind) & (sale_month < month)
+        # Move each earlier sale to the market level of the month before listing:
+        # adjusted = log price + (level now - level when it sold). On the log scale,
+        # adding a difference multiplies by a ratio: a 5% lower market now means 5% off.
+        level_then = index[kind].reindex(sale_month[earlier]).to_numpy()
+        adjusted = log_price[earlier] + index.at[reference, kind] - level_then
+
+        # Same type, same community, last `community_months` months.
+        recent = sale_month[earlier] >= month - community_months
+        by_community = pd.Series(adjusted[recent]).groupby(communities[earlier][recent])
+        out.loc[group.index, "community_log_price"] = group["community"].map(by_community.median()).to_numpy()
+        out.loc[group.index, "community_sales"] = group["community"].map(by_community.size()).fillna(0).to_numpy()
+
+        # The k nearest sales of the same type within the last `comp_years` years.
+        window = sale_month[earlier] >= month - 12 * comp_years
+        if window.sum() == 0:
+            continue
+        pool_xy = sale_xy[earlier][window]
+        pool_price = adjusted[window]
+        pool_sqft = log_sqft[earlier][window]
+        pool_age = month - sale_month[earlier][window]
+        n = min(k, len(pool_price))
+        # A KD-tree finds nearest points fast, like an index in a book: it skips the
+        # far-away sales instead of measuring the distance to every one of them.
+        # distance and nearest have one row per home and one column per comp.
+        distance, nearest = cKDTree(pool_xy).query(home_xy[rows], k=n)
+        distance, nearest = distance.reshape(len(rows), n), nearest.reshape(len(rows), n)
+
+        # Summaries of each home's comps, one number per home (axis=1: across its comps).
+        prices = pool_price[nearest]
+        sqft = pool_sqft[nearest]
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)   # nanmedian of comps with no sizes
+            out.loc[group.index, "comp_log_price"] = np.median(prices, axis=1)
+            out.loc[group.index, "comp_log_price_per_sqft"] = np.nanmedian(prices - sqft, axis=1)
+            out.loc[group.index, "comp_log_square_feet"] = np.nanmedian(sqft, axis=1)
+            out.loc[group.index, "comp_spread"] = np.std(prices, axis=1)
+            out.loc[group.index, "comp_distance_km"] = np.median(distance, axis=1)
+            out.loc[group.index, "comp_months_ago"] = np.median(pool_age[nearest], axis=1)
+
+            # Same building: keep only the comps within 50 m, blank out the rest (NaN).
+            same_building = distance < SAME_BUILDING_KM
+            out.loc[group.index, "building_sales"] = same_building.sum(axis=1)
+            out.loc[group.index, "building_log_price"] = np.nanmedian(
+                np.where(same_building, prices, np.nan), axis=1)
+            out.loc[group.index, "building_log_price_per_sqft"] = np.nanmedian(
+                np.where(same_building, prices - sqft, np.nan), axis=1)
+
+        # The k nearest by location and size together, for homes and comps with a size.
+        home_sqft = log_square_feet(group["house_area"]).to_numpy()
+        sized_pool = np.isfinite(pool_sqft)
+        sized_homes = np.isfinite(home_sqft)
+        if sized_pool.sum() == 0 or sized_homes.sum() == 0:
+            continue
+        # Size becomes a third coordinate next to x and y, so "nearest" weighs both.
+        pool_xyz = np.column_stack([pool_xy[sized_pool], size_weight * pool_sqft[sized_pool]])
+        home_xyz = np.column_stack([home_xy[rows][sized_homes], size_weight * home_sqft[sized_homes]])
+        n = min(k, int(sized_pool.sum()))
+        distance, nearest = cKDTree(pool_xyz).query(home_xyz, k=n)
+        distance, nearest = distance.reshape(-1, n), nearest.reshape(-1, n)
+        sized_index = group.index[sized_homes]
+        out.loc[sized_index, "sized_comp_log_price"] = np.median(pool_price[sized_pool][nearest], axis=1)
+        out.loc[sized_index, "sized_comp_distance"] = np.median(distance, axis=1)
+    return out
+
+
+def starting_guess(comparables, use_sized_comps=False):
+    """A first estimate of each home's log price before the model's corrections: its
+    comparables if it has them (matched on size too, if use_sized_comps), else its
+    community, else its property type's level."""
+    guess = comparables["comp_log_price"]
+    if use_sized_comps:
+        guess = comparables["sized_comp_log_price"].fillna(guess)
+    return (guess
+            .fillna(comparables["community_log_price"])
+            .fillna(comparables["market_level"]))
+
+
+def off_market_model_features(homes, sales, categories, use_sized_comps=False, **comp_settings):
+    """Every feature of the off-market model: the home itself, what similar homes sold
+    for, and how this home differs from them (bigger than its comps? that matters).
+    comp_settings (k, comp_years, size_weight) go to comparable_features()."""
+    X = home_features(homes, categories)
+    comparables = comparable_features(homes, sales, **comp_settings)
+    X = X.join(comparables)
+    X["starting_guess"] = starting_guess(comparables, use_sized_comps)
+    # Above 0: bigger than its comps (0.2 is about 22% bigger).
+    X["sqft_vs_comps"] = X["log_square_feet"] - X["comp_log_square_feet"]
+    # A second estimate: the comps' price per square foot times this home's size.
+    X["guess_from_price_per_sqft"] = X["comp_log_price_per_sqft"] + X["log_square_feet"]
     return X

@@ -10,17 +10,29 @@ deliberately simple, so you can measure how much your own ideas add.
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import KFold
 
 import features
 
 
 def make_model(track):
-    """Return a fresh, untrained model for "off_market" or "list_aware"."""
+    """Return a fresh, untrained model for "off_market" or "list_aware".
+
+    run.py calls this for every validation month and for the final predictions, so
+    changing the model here changes everything: validate, report and predict.
+    """
     if track == "list_aware":
-        #return ListPriceBaseline()
-        return FeatureModel(features.list_aware_features)   # try this instead
-    #return NearestSalesBaseline(k=10)
-    return FeatureModel(features.off_market_features)       # try this instead
+        # Evana's model (branch evana_code): 4.35% validation MdAPE vs 7.26% for the list price.
+        return ListAwareModel(features.list_aware_evana_features)
+        # return ListPriceBaseline()                          # the starter baseline
+    # Chosen in experiments.py on June to November 2025 ("more_trees"): 8.36% MdAPE there,
+    # and 8.36% on the Dec 2025 to May 2026 validation months, run once at the end.
+    # To try another setting, add a variant to experiments.py rather than editing this line.
+    return OffMarketModel(max_iter=1500, learning_rate=0.03)
+    # return NearestSalesBaseline(k=10)                       # the starter baseline
+    # return FeatureModel(features.off_market_features)       # the starter's tree model
 
 
 class ListPriceBaseline:
@@ -82,24 +94,40 @@ class FeatureModel:
     """
 
     def __init__(self, make_features):
-        # self.make_features = make_features
-        # self.model = HistGradientBoostingRegressor(
-        #     # 2. Decreased Learning Rate to increase accuracy and careful learning 
-        #     learning_rate=0.05, #default is 0.1, lowering learning rate slows learning down but allows for more accuracy 
-        #     max_iter=500, #default iteration is 100, but as learning
-        #     # 3. changing loss function to be based on absolute error  
-        #     loss= "absolute_error",
-        #     random_state=0)
+        self.make_features = make_features
+        self.model = HistGradientBoostingRegressor(random_state=0)
+
+    def fit(self, train):
+        self.model.fit(self.make_features(train), np.log(train["sold_price"]))
+        return self
+
+    def predict(self, homes):
+        return np.exp(self.model.predict(self.make_features(homes)))
+
+
+class ListAwareModel:
+    """List-aware model, by Evana: gradient-boosted trees on the home's features plus
+    its list price (features.list_aware_evana_features).
+
+    Like FeatureModel it learns log(price), but it also uses text columns
+    (municipality, community) as categories. The list price carries most of what the
+    market knows; the trees learn when homes sell above or below it. The list price
+    alone predicts 5.7% too high; this model's median signed error is +0.8%.
+    """
+
+    def __init__(self, make_features):
         self.make_features = make_features
         self.model = HistGradientBoostingRegressor(
-            categorical_features="from_dtype", 
-            learning_rate=0.05, 
-            max_iter=500,
-            # loss= "absolute_error",
-            random_state=0)   # edit: added the argument
-        self.categories = {}  
-    
+            categorical_features="from_dtype",   # treat pandas category columns as categories
+            learning_rate=0.05,                  # smaller steps than the default 0.1...
+            max_iter=500,                        # ...and more of them than the default 100
+            random_state=0)
+        self.categories = {}
+
     def _encode(self, X, fit=False):
+        """Turn every text column into a category column. When fitting, remember the
+        250 most common values of each (the trees allow at most 255 categories); test
+        homes are then coded with the same list, and any other value counts as missing."""
         X = X.copy()
         for col in X.columns:
             if not pd.api.types.is_numeric_dtype(X[col]):
@@ -109,17 +137,139 @@ class FeatureModel:
         return X
 
     def fit(self, train):
-        # 4. added sample weights -> adjusting weights to be heavier in more recent dates
-        # age_months = (train["date_sold"].max() - train["date_sold"]).dt.days /30.44
-        # weights = 0.5 ** (age_months /6)
-        # self.model.fit(self.make_features(train), np.log(train["sold_price"]), sample_weight= weights)
-        # self.model.fit(self.make_features(train), np.log(train["sold_price"])) # default weights
-        self.model.fit(self._encode(self.make_features(train), fit=True), np.log(train["sold_price"])) #encode weights
-        # self.model.fit(self._encode(self.make_features(train), fit=True), np.log(train["sold_price"]), sample_weight= weights) #encode +sample weights
-
+        self.model.fit(self._encode(self.make_features(train), fit=True), np.log(train["sold_price"]))
         return self
 
     def predict(self, homes):
-        # return np.exp(self.model.predict(self.make_features(homes)))
         return np.exp(self.model.predict(self._encode(self.make_features(homes))))
 
+
+class OffMarketModel:
+    """Off-market model: start from what comparable homes sold for, then let
+    gradient-boosted trees correct that guess for how this home differs.
+
+    1. Starting guess: the median price of the 15 nearest earlier sales of the same
+       type, each moved to the current market level (features.comparable_features).
+    2. The trees learn log(sold price) - log(starting guess): how far above or below
+       its comps a home sells. They see about 50 features (features.py): the home
+       itself (size, lot, garage, style, remark keywords), its comps (price per sq ft,
+       spread, distance, age), sales in the same building, comps matched on size,
+       the community's level, and how fast the market has been moving.
+    3. Prediction = starting guess * exp(the trees' correction).
+
+    Why not let the trees predict the price directly? Trees cannot extrapolate: they
+    never predict a price level they have not seen. The starting guess carries the
+    market level forward in time; the trees only need to learn corrections, which
+    change much more slowly than prices do.
+
+    Every feature uses only sales from before the month the home was listed, for the
+    training homes too, so the model learns under the same conditions it is used in.
+    """
+
+    CATEGORY_COLUMNS = ["house_style", "municipality"]
+    SALE_COLUMNS = ["ml_num", "house_type_name", "community", "date_sold", "latitude", "longitude",
+                    "house_area", "sold_price"]
+
+    def __init__(self, k=15, comp_years=2, size_weight=5.0, use_sized_comps=False,
+                 half_life_years=None, exclude=(), text_score=False, **tree_settings):
+        """k, comp_years, size_weight: how comparables are chosen (features.comparable_features).
+        use_sized_comps: start from comps matched on size as well as location.
+        half_life_years: if set, older training sales count less: a sale this many years
+        older than the newest counts half as much. None: every sale counts the same.
+        exclude: feature columns to leave out, to test what a feature group adds.
+        text_score: add RemarksScore, a score read from the listing description.
+        tree_settings: passed to HistGradientBoostingRegressor, e.g. loss="absolute_error"."""
+        self.comp_settings = dict(k=k, comp_years=comp_years, size_weight=size_weight,
+                                  use_sized_comps=use_sized_comps)
+        self.half_life_years = half_life_years
+        self.exclude = list(exclude)
+        self.text = RemarksScore() if text_score else None
+        # The trees. Boosting adds small trees one at a time, each fitted to the errors
+        # left by the ones before it:
+        #   max_iter            how many trees at most
+        #   learning_rate       each tree's correction is shrunk to this share: many small
+        #                       steps generalise better than a few big ones
+        #   max_leaf_nodes      each tree splits the homes into at most 31 groups
+        #   min_samples_leaf    every group holds at least 50 training homes, so no rule
+        #                       rests on a handful of sales (guards against overfitting)
+        #   l2_regularization   shrinks extreme corrections, like ridge regression
+        #   random_state        fixed, so every run gives the same predictions
+        settings = dict(max_iter=600, learning_rate=0.05, max_leaf_nodes=31, min_samples_leaf=50,
+                        l2_regularization=1.0, random_state=0)
+        settings.update(tree_settings)   # make_model() passes max_iter=1500, learning_rate=0.03
+        self.model = HistGradientBoostingRegressor(**settings)
+
+    def features(self, homes):
+        """One row of numbers per home: what the trees see. The comparables come from
+        self.sales, the training sales, and only those sold before each home's listing month."""
+        X = features.off_market_model_features(homes, self.sales, self.categories, **self.comp_settings)
+        return X.drop(columns=self.exclude)
+
+    def fit(self, train):
+        # Keep the past sales: predict() looks up comparables among them too.
+        self.sales = train[self.SALE_COLUMNS]
+        # The text values of the category columns, so test homes are coded like training homes.
+        self.categories = {c: sorted(train[c].dropna().unique()) for c in self.CATEGORY_COLUMNS}
+        X = self.features(train)
+        # What the trees learn: how far each home sold above (> 0) or below (< 0) its
+        # starting guess, in log terms (0.10 is about 10% above).
+        target = np.log(train["sold_price"]) - X["starting_guess"]
+        # The first homes of 2021 have no earlier sales to compare with: skip them.
+        usable = target.notna()
+        weight = None
+        if self.half_life_years:
+            age_years = (train["date_sold"].max() - train["date_sold"]).dt.days / 365.25
+            weight = (0.5 ** (age_years / self.half_life_years))[usable]
+        X, target = X[usable].copy(), target[usable]
+        if self.text:
+            X["text_score"] = self.text.fit_out_of_fold(train["remarks"][usable], target.to_numpy())
+        # Last resort for a home with no starting guess at all (never happens in practice).
+        self.fallback = float(np.log(train["sold_price"]).median())
+        self.model.fit(X, target, sample_weight=weight)
+        return self
+
+    def predict(self, homes):
+        X = self.features(homes)   # the same features as in fit(), in the same order
+        if self.text:
+            X["text_score"] = self.text.predict(homes["remarks"])
+        guess = X["starting_guess"].fillna(self.fallback)
+        # Back from logs to dollars: exp(guess + correction) = comps' price * exp(correction).
+        return np.exp(guess + self.model.predict(X)).to_numpy()
+
+
+class RemarksScore:
+    """A score read from the listing description: how far above or below its starting
+    guess a home with these words tends to sell.
+
+    Not used by make_model(): in experiments.py it lowered MAPE by about 0.1 but not
+    MdAPE, below our bar for keeping a change. Switch it on with text_score=True.
+
+    The words and two- and three-word phrases of each description ("blank slate",
+    "new roof", "completely redone") become columns, weighted by how rare they are
+    (TF-IDF), and a ridge regression learns each phrase's effect on
+    log(sold price) - log(starting guess). Ridge shrinks the effects of rare phrases
+    towards 0, so a phrase seen in a few sales cannot claim a big effect.
+
+    The trees then use the score as one more feature. For the training homes, each
+    score comes from a regression fitted WITHOUT that home (5-fold cross-fitting):
+    a regression scoring the homes it learned from would look far more accurate on
+    them than on new homes, and the trees would learn to trust it too much.
+    """
+
+    def __init__(self, alpha=3.0, folds=5):
+        self.alpha = alpha
+        self.folds = folds
+
+    def fit_out_of_fold(self, remarks, target):
+        """Fit on all the training homes; return each home's score from the fold that left it out."""
+        self.vectorizer = TfidfVectorizer(ngram_range=(1, 3), min_df=20, sublinear_tf=True)
+        words = self.vectorizer.fit_transform(remarks.fillna(""))
+        scores = np.zeros(len(target))
+        for fit_rows, score_rows in KFold(self.folds, shuffle=True, random_state=0).split(target):
+            regression = Ridge(alpha=self.alpha).fit(words[fit_rows], target[fit_rows])
+            scores[score_rows] = regression.predict(words[score_rows])
+        self.regression = Ridge(alpha=self.alpha).fit(words, target)
+        return scores
+
+    def predict(self, remarks):
+        return self.regression.predict(self.vectorizer.transform(remarks.fillna("")))

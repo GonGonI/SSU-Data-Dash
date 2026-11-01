@@ -77,6 +77,34 @@ def test_nearest_sales_uses_the_nearest_homes_of_the_same_type():
     assert model.predict(data.hide_answers(home, "off_market"))[0] == 500_000
 
 
+# ---- the off-market model never looks into the future ----
+
+def test_off_market_features_ignore_later_sales():
+    listings = make_listings(1500)
+    homes = data.hide_answers(make_listings(30, seed=1, first_id=5000), "off_market")
+    homes = homes[homes["date_listed"] >= pd.Timestamp("2025-09-01")]
+    # Add sales from after every home was listed, at absurd prices: no feature of
+    # these homes may change.
+    later = make_listings(300, seed=3, first_id=9000).assign(
+        date_sold=homes["date_listed"].max() + pd.Timedelta(days=40), sold_price=1e9)
+    model = models.OffMarketModel()
+    model.categories = {c: ["Apartment"] if c == "house_style" else ["Toronto"] for c in model.CATEGORY_COLUMNS}
+    model.sales = listings
+    before = model.features(homes)
+    model.sales = pd.concat([listings, later])
+    after = model.features(homes)
+    pd.testing.assert_frame_equal(before, after)
+
+
+def test_off_market_model_never_uses_list_price():
+    listings = make_listings(1500)
+    homes = data.hide_answers(make_listings(30, seed=1, first_id=5000), "off_market")
+    assert "list_price" not in homes.columns
+    model = models.OffMarketModel(max_iter=20).fit(listings)
+    predicted = model.predict(homes)
+    assert np.isfinite(predicted).all() and (predicted > 0).all()
+
+
 # ---- check_submission rejects bad files ----
 
 IDS = ["SYN-0000001", "SYN-0000002", "SYN-0000003"]
