@@ -3,7 +3,10 @@
     python analysis.py breakdown   where the off-market model misses: by property type,
                                    by month and by price range (needs `python run.py validate` first)
     python analysis.py horizon     how the error grows when the model has to predict
-                                   further past its training data (takes a few minutes)
+                                   further past its training data (takes about 15 minutes)
+    python analysis.py horizon-figure
+                                   redraw figures/error_by_horizon.png from the saved
+                                   results, without rerunning the models
 
 Both print tables and save them to reports/ so you can copy them into the report.
 """
@@ -71,9 +74,59 @@ def horizon(gaps=(0, 1, 2, 3)):
                                       "predicted_price": predicted}))
             print(f"gap {gap} months, {month}: trained on sales before {month - gap}")
     predictions = pd.concat(rows)
-    tables = {"Months between the end of the training data and the sale":
-              error_table(predictions, predictions["gap"])}
+    table = error_table(predictions, predictions["gap"])
+    tables = {"Months between the end of the training data and the sale": table}
     write_tables("Off-market error by forecast horizon", tables, ROOT / "reports" / "error_by_horizon.md")
+    table.rename_axis("gap").to_csv(ROOT / "reports" / "error_by_horizon.csv")
+    horizon_figure()
+
+
+# The handout's accuracy bar: the simple baseline's MdAPE on validation.
+ACCURACY_BAR = 17.7
+
+
+def horizon_figure():
+    """Figure: off-market MdAPE by months between the end of the training data and the
+    sale, from reports/error_by_horizon.csv (written by `python analysis.py horizon`)."""
+    import matplotlib.pyplot as plt
+
+    path = ROOT / "reports" / "error_by_horizon.csv"
+    if not path.exists():
+        sys.exit(f"{path} does not exist yet: run `python analysis.py horizon` first")
+    table = pd.read_csv(path)
+    ink, quiet, grid, line = "#0b0b0b", "#52514e", "#e5e5e5", "#2a78d6"
+
+    fig, ax = plt.subplots(figsize=(7, 3.6))
+    ax.plot(table["gap"], table["mdape"], color=line, linewidth=2, marker="o", markersize=7, zorder=3)
+    # Label the first and last point: where validation stands, and the furthest test homes.
+    for i in (0, len(table) - 1):
+        gap, mdape = table.loc[i, "gap"], table.loc[i, "mdape"]
+        ax.annotate(f"{mdape:.2f}%", (gap, mdape), xytext=(0, 10), textcoords="offset points",
+                    ha="center", fontsize=10, color=ink, fontweight="bold")
+    ax.axhline(ACCURACY_BAR, color=quiet, linewidth=1, linestyle=(0, (4, 3)))
+    ax.text(table["gap"].max(), ACCURACY_BAR + 0.6, f"Accuracy bar: {ACCURACY_BAR}% (simple baseline)",
+            ha="right", fontsize=9, color=quiet)
+    ax.text(table["gap"].max(), 2.2, "Test homes sold Jun to Sep 2026 from data ending May 2026, 0 to 3 months\n"
+            f"past the data: we expect a hidden-test MdAPE of about {table['mdape'].min():.1f}% to "
+            f"{table['mdape'].max():.1f}%.", ha="right", fontsize=8.5, color=quiet)
+
+    ax.set_xticks(table["gap"], [f"{g} month{'s' if g != 1 else ''}" for g in table["gap"]])
+    ax.set_xlabel("Months between the end of the training data and the sale", color=quiet)
+    ax.set_ylabel("Off-market MdAPE (%)", color=quiet)
+    ax.set_ylim(0, 20)
+    ax.set_xlim(table["gap"].min() - 0.3, table["gap"].max() + 0.3)
+    ax.grid(axis="y", color=grid)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.spines[["left", "bottom"]].set_color(grid)
+    ax.tick_params(colors=quiet)
+    ax.set_title("Predicting further ahead costs little: error rises from "
+                 f"{table['mdape'].iloc[0]:.2f}% to {table['mdape'].iloc[-1]:.2f}%",
+                 loc="left", fontsize=12, color=ink, fontweight="bold")
+    fig.tight_layout()
+    (ROOT / "figures").mkdir(exist_ok=True)
+    fig.savefig(ROOT / "figures" / "error_by_horizon.png", dpi=200)
+    plt.close(fig)
+    print("Wrote figures/error_by_horizon.png")
 
 
 def write_tables(title, tables, path):
@@ -90,7 +143,7 @@ def write_tables(title, tables, path):
     print(f"Wrote {path.relative_to(ROOT)}")
 
 
-COMMANDS = {"breakdown": breakdown, "horizon": horizon}
+COMMANDS = {"breakdown": breakdown, "horizon": horizon, "horizon-figure": horizon_figure}
 
 if __name__ == "__main__":
     if len(sys.argv) != 2 or sys.argv[1] not in COMMANDS:
