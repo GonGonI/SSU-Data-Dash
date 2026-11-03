@@ -2,44 +2,34 @@
 
 This is a walkthrough of the code, in the order it runs, written for the team.
 
-## 1. Get this branch into VS Code
+## 1. Get the code into VS Code
 
-The work is on the branch `claude/keen-wright-6wgzt7` of `github.com/GonGonI/SSU-Data-Dash`.
-
-In the VS Code terminal (`` Ctrl+` ``), inside your `SSU-Data-Dash` folder:
-
-```
-git remote -v                       # which GitHub repo is "origin"?
-```
-
-If origin is `GonGonI/SSU-Data-Dash`:
+The final code is on `main` of `github.com/GonGonI/SSU-Data-Dash`. In a terminal, in the folder
+where you keep projects (not inside an existing copy):
 
 ```
-git fetch origin claude/keen-wright-6wgzt7
-git checkout claude/keen-wright-6wgzt7
+git clone https://github.com/GonGonI/SSU-Data-Dash
+cd SSU-Data-Dash
+python3 -m venv .venv
+source .venv/bin/activate           # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-If origin is `erwinzhang7/SSU-Data-Dash` (you cloned the starter), add the team repo first:
-
-```
-git remote add team https://github.com/GonGonI/SSU-Data-Dash
-git fetch team claude/keen-wright-6wgzt7
-git checkout -b claude/keen-wright-6wgzt7 team/claude/keen-wright-6wgzt7
-```
+Then open the `SSU-Data-Dash` folder in VS Code (File → Open Folder). Later updates: `git pull`.
 
 To see what changed:
 - **Source Control panel** (left sidebar, branch icon), or the branch name at the bottom-left, to
   switch branches.
-- `git log --oneline -5` lists the commits; `git diff main -- features.py models.py` shows the code
-  changes. In VS Code, open the command palette (`Cmd+Shift+P`) and run **Git: Open Changes**, or
-  click a file in the Source Control panel, to get a side-by-side diff.
+- `git log --oneline -5` lists the latest commits. In VS Code, open the command palette
+  (`Cmd+Shift+P`) and run **Git: Open Changes**, or click a file in the Source Control panel, to
+  get a side-by-side diff.
 
 Then run it:
 
 ```
 source .venv/bin/activate
 pytest                      # 20 quick tests on made-up data, a few seconds
-python run.py validate      # about a minute: 6 months x (fit + predict)
+python run.py validate      # about 5 minutes: 6 months x (fit + predict), both tracks
 python run.py report        # the MdAPE table you log
 ```
 
